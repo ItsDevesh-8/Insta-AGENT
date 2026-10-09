@@ -1,0 +1,263 @@
+{
+  "name": "Instagram Autopilot — Token Keeper",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "every-day-0800",
+      "name": "Every Day 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v21.0/debug_token",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "input_token",
+              "value": "={{ $env.IG_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $env.IG_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "check-token-health",
+      "name": "Check Token Health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// How many days until this token dies?\nconst d = $input.first().json?.data || {};\nconst expiresAt = Number(d.expires_at || 0);          // 0 = never expires\nconst valid = d.is_valid === true;\n\nlet daysLeft = 999;\nif (expiresAt > 0) {\n  daysLeft = Math.floor((expiresAt * 1000 - Date.now()) / 86400000);\n}\n\nreturn [{ json: {\n  valid,\n  days_left: daysLeft,\n  expires_human: expiresAt ? new Date(expiresAt * 1000).toISOString().slice(0, 10) : 'never',\n  needs_action: !valid || daysLeft <= 14,\n  scopes: (d.scopes || []).join(', '),\n} }];\n"
+      },
+      "id": "evaluate-expiry",
+      "name": "Evaluate Expiry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "nr",
+              "leftValue": "={{ $json.needs_action }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "needs-refresh?",
+      "name": "Needs Refresh?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v21.0/oauth/access_token",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "grant_type",
+              "value": "fb_exchange_token"
+            },
+            {
+              "name": "client_id",
+              "value": "={{ $env.META_APP_ID }}"
+            },
+            {
+              "name": "client_secret",
+              "value": "={{ $env.META_APP_SECRET }}"
+            },
+            {
+              "name": "fb_exchange_token",
+              "value": "={{ $env.IG_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "exchange-for-new-token",
+      "name": "Exchange For New Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        200
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "PUT_YOUR_TELEGRAM_CHAT_ID_HERE",
+        "text": "=🔑 INSTAGRAM TOKEN NEEDS ROTATING\n\nDays left on old token: {{ $('Evaluate Expiry').first().json.days_left }}\nExpires: {{ $('Evaluate Expiry').first().json.expires_human }}\n\nNEW TOKEN:\n{{ $json.access_token || 'EXCHANGE FAILED — generate manually in Graph API Explorer' }}\n\nACTION: paste it into the IG_ACCESS_TOKEN env var and restart n8n.\nUntil you do, posting will stop when the old token expires.",
+        "additionalFields": {}
+      },
+      "id": "notify-new-token",
+      "name": "Notify: New Token",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        800,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "token-healthy",
+      "name": "Token Healthy",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        580,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🔑 TOKEN KEEPER\n\nInstagram long-lived tokens die after **60 days**.\nThis runs daily, checks how many days are left, and\nat 14 days out it mints a fresh one and Telegrams it to you.\n\nn8n cannot rewrite its own env var — you paste the new\ntoken into `IG_ACCESS_TOKEN` and restart. Two minutes,\ntwice a year, and the pipeline never silently dies.\n\nNeeds env vars: `META_APP_ID`, `META_APP_SECRET`, `IG_ACCESS_TOKEN`.",
+        "height": 320,
+        "width": 560,
+        "color": 3
+      },
+      "id": "sticky-token",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -300,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "Every Day 08:00": {
+      "main": [
+        [
+          {
+            "node": "Check Token Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Token Health": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Expiry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Expiry": {
+      "main": [
+        [
+          {
+            "node": "Needs Refresh?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Refresh?": {
+      "main": [
+        [
+          {
+            "node": "Exchange For New Token",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Token Healthy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exchange For New Token": {
+      "main": [
+        [
+          {
+            "node": "Notify: New Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "instagram-autopilot-token"
+  },
+  "tags": []
+}

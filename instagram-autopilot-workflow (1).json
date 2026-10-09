@@ -1,0 +1,1465 @@
+{
+  "name": "Instagram Autopilot — BOX ➜ AGENT ➜ INSTAGRAM",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "every-15-minutes",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "paused",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "a2",
+              "name": "dry_run",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "a3",
+              "name": "timezone",
+              "value": "Asia/Kolkata",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "post_times",
+              "value": "09:00,21:00",
+              "type": "string"
+            },
+            {
+              "id": "a5",
+              "name": "active_days",
+              "value": "Mon,Tue,Wed,Thu,Fri,Sat,Sun",
+              "type": "string"
+            },
+            {
+              "id": "a6",
+              "name": "blackout_dates",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "a7",
+              "name": "jitter_minutes",
+              "value": 0,
+              "type": "number"
+            },
+            {
+              "id": "a8",
+              "name": "low_queue_alert",
+              "value": 3,
+              "type": "number"
+            },
+            {
+              "id": "a9",
+              "name": "max_attempts",
+              "value": 2,
+              "type": "number"
+            },
+            {
+              "id": "a10",
+              "name": "sheet_id",
+              "value": "PUT_YOUR_GOOGLE_SHEET_ID_HERE",
+              "type": "string"
+            },
+            {
+              "id": "a11",
+              "name": "sheet_tab",
+              "value": "Queue",
+              "type": "string"
+            },
+            {
+              "id": "a12",
+              "name": "telegram_chat_id",
+              "value": "PUT_YOUR_TELEGRAM_CHAT_ID_HERE",
+              "type": "string"
+            },
+            {
+              "id": "a13",
+              "name": "min_width",
+              "value": 320,
+              "type": "number"
+            },
+            {
+              "id": "a14",
+              "name": "max_file_mb",
+              "value": 8,
+              "type": "number"
+            },
+            {
+              "id": "a15",
+              "name": "block_duplicates",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// ============================================================\n// CLOCK GATE - decides whether this 15-min tick is a posting slot.\n// Pure logic. No API calls. Nothing here touches your captions.\n// ============================================================\nconst c = $input.first().json;\n\nconst out = { ...c, should_post: false, reason: '', jitter_seconds: 0 };\n\nif (c.paused === true || String(c.paused).toLowerCase() === 'true') {\n  out.reason = 'Workflow is paused in Config.';\n  return [{ json: out }];\n}\n\nconst tz = c.timezone || 'Asia/Kolkata';\nconst now = new Date();\n\nconst parts = new Intl.DateTimeFormat('en-GB', {\n  timeZone: tz, weekday: 'short', year: 'numeric', month: '2-digit',\n  day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,\n}).formatToParts(now).reduce((a, p) => (a[p.type] = p.value, a), {});\n\nconst weekday = parts.weekday;                                   // \"Mon\"\nconst dateStr = `${parts.year}-${parts.month}-${parts.day}`;     // \"2026-09-04\"\nconst hh = parseInt(parts.hour, 10);\nconst mm = parseInt(parts.minute, 10);\nconst nowMin = hh * 60 + mm;\n\nout.local_time = `${dateStr} ${parts.hour}:${parts.minute} (${weekday}) ${tz}`;\n\nconst activeDays = String(c.active_days || '').split(',').map(s => s.trim()).filter(Boolean);\nif (activeDays.length && !activeDays.includes(weekday)) {\n  out.reason = `${weekday} is not an active day.`;\n  return [{ json: out }];\n}\n\nconst blackouts = String(c.blackout_dates || '').split(',').map(s => s.trim()).filter(Boolean);\nif (blackouts.includes(dateStr)) {\n  out.reason = `${dateStr} is a blackout date.`;\n  return [{ json: out }];\n}\n\n// A slot matches if \"now\" falls inside the 15-minute bucket that\n// contains the configured time. Exactly one tick per slot can match,\n// so a post can never fire twice for the same slot.\nconst slots = String(c.post_times || '').split(',').map(s => s.trim()).filter(Boolean);\nlet matched = null;\nfor (const s of slots) {\n  const [sh, sm] = s.split(':').map(n => parseInt(n, 10));\n  if (Number.isNaN(sh) || Number.isNaN(sm)) continue;\n  const slotMin = sh * 60 + sm;\n  const bucketStart = Math.floor(slotMin / 15) * 15;\n  if (nowMin >= bucketStart && nowMin < bucketStart + 15) { matched = s; break; }\n}\n\nif (!matched) {\n  out.reason = `No slot at ${parts.hour}:${parts.minute}. Slots: ${slots.join(', ')}`;\n  return [{ json: out }];\n}\n\n// Optional human-like jitter, hard-capped at 14 min so it can never\n// bleed into the next bucket.\nconst jit = Math.max(0, Math.min(14, Number(c.jitter_minutes) || 0));\nout.jitter_seconds = jit > 0 ? Math.floor(Math.random() * jit * 60) : 0;\n\nout.should_post = true;\nout.slot = matched;\nout.reason = `Slot ${matched} matched.`;\nreturn [{ json: out }];\n"
+      },
+      "id": "clock-gate",
+      "name": "Clock Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-should_post",
+              "leftValue": "={{ $json.should_post }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "is-it-post-time",
+      "name": "Is It Post Time?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "not-now---stop",
+      "name": "Not Now - Stop",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        420,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.jitter_seconds }}",
+        "unit": "seconds"
+      },
+      "id": "human-jitter-wait",
+      "name": "Human Jitter Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        420,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_id }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_tab }}",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "read-queue",
+      "name": "Read Queue",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        640,
+        180
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// ============================================================\n// PICK NEXT POST - chooses which row goes out, and how many are left.\n// Order: priority DESC, then scheduled_for, then sheet order (FIFO).\n// ============================================================\nconst cfg = $('Config').first().json;\nconst rows = $input.all().map(i => i.json);\n\nconst norm = v => String(v ?? '').trim().toLowerCase();\nconst nowISO = new Date().toISOString();\n\nconst pending = rows.filter(r => {\n  const s = norm(r.status);\n  if (s !== 'pending' && s !== '') return false;\n  if (!String(r.image_url ?? '').trim()) return false;\n  const sched = String(r.scheduled_for ?? '').trim();\n  if (sched && new Date(sched).toString() !== 'Invalid Date' && new Date(sched).toISOString() > nowISO) return false;\n  return true;\n});\n\n// Recover rows stuck in \"processing\" for more than 2 hours\n// (e.g. n8n restarted mid-run) so nothing is lost forever.\nconst stuck = rows.filter(r => {\n  if (norm(r.status) !== 'processing') return false;\n  const t = new Date(String(r.locked_at ?? ''));\n  return t.toString() === 'Invalid Date' || (Date.now() - t.getTime()) > 2 * 60 * 60 * 1000;\n});\n\nconst pool = pending.length ? pending : stuck;\n\nif (!pool.length) {\n  return [{ json: { queue_empty: true, remaining: 0, stuck_recovered: 0 } }];\n}\n\npool.sort((a, b) => {\n  const pa = Number(a.priority) || 0, pb = Number(b.priority) || 0;\n  if (pa !== pb) return pb - pa;\n  const sa = String(a.scheduled_for ?? ''), sb = String(b.scheduled_for ?? '');\n  if (sa && sb && sa !== sb) return sa < sb ? -1 : 1;\n  if (sa && !sb) return -1;\n  if (!sa && sb) return 1;\n  return 0;\n});\n\nconst post = pool[0];\n\nreturn [{\n  json: {\n    queue_empty: false,\n    remaining: pending.length,\n    stuck_recovered: pending.length ? 0 : stuck.length,\n    id: String(post.id ?? '').trim(),\n    image_url: String(post.image_url ?? '').trim(),\n    caption: String(post.caption ?? ''),   // <-- passed through VERBATIM, never rewritten\n    attempts: Number(post.attempts) || 0,\n    run_id: `${$execution.id}-${Date.now()}`,\n  }\n}];\n"
+      },
+      "id": "pick-next-post",
+      "name": "Pick Next Post",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-queue_empty",
+              "leftValue": "={{ $json.queue_empty }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "queue-empty",
+      "name": "Queue Empty?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1080,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Config').first().json.telegram_chat_id }}",
+        "text": "=🚨 INSTAGRAM AUTOPILOT — BOX IS EMPTY\n\nNothing was posted at slot {{ $('Clock Gate').first().json.slot }}.\n\nDrop new posts into the sheet (image_url + caption, status = pending) or your feed goes quiet.",
+        "additionalFields": {}
+      },
+      "id": "notify-queue-empty",
+      "name": "Notify: Queue Empty",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1300,
+        40
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Build the row update that claims this post so a second run\n// (or a retry) can never publish the same image twice.\nconst j = $input.first().json;\nreturn [{ json: {\n  id: j.id,\n  status: 'processing',\n  locked_at: new Date().toISOString(),\n  run_id: j.run_id,\n  attempts: j.attempts + 1,\n} }];\n"
+      },
+      "id": "build-lock",
+      "name": "Build Lock",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_id }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_tab }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "lock-row",
+      "name": "Lock Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1520,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Pick Next Post').first().json.image_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "download-image",
+      "name": "Download Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1740,
+        300
+      ],
+      "onError": "stopWorkflow",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// ============================================================\n// IMAGE VALIDATOR - deterministic. No AI. No network. No cost.\n// Reads the real bytes and checks Instagram's actual rules.\n// ============================================================\nconst cfg  = $('Config').first().json;\nconst post = $('Pick Next Post').first().json;\n\nconst fail = (msg) => [{ json: { image_ok: false, error: msg, ...post } }];\n\nlet buf;\ntry {\n  buf = await this.helpers.getBinaryDataBuffer(0, 'data');\n} catch (e) {\n  return fail('Could not download image: ' + e.message);\n}\n\nconst sizeMB = buf.length / (1024 * 1024);\nconst maxMB = Number(cfg.max_file_mb) || 8;\nif (sizeMB > maxMB) return fail(`Image is ${sizeMB.toFixed(2)} MB, limit is ${maxMB} MB.`);\nif (buf.length < 1024) return fail('File is too small to be a real image.');\n\n// ---- format + dimensions, parsed straight from the file header ----\nlet width = 0, height = 0, format = '';\n\nif (buf[0] === 0xFF && buf[1] === 0xD8) {\n  format = 'jpeg';\n  let i = 2;\n  while (i < buf.length - 9) {\n    if (buf[i] !== 0xFF) { i++; continue; }\n    const marker = buf[i + 1];\n    if (marker >= 0xC0 && marker <= 0xCF && ![0xC4, 0xC8, 0xCC].includes(marker)) {\n      height = buf.readUInt16BE(i + 5);\n      width  = buf.readUInt16BE(i + 7);\n      break;\n    }\n    if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { i += 2; continue; }\n    i += 2 + buf.readUInt16BE(i + 2);\n  }\n} else if (buf.slice(0, 8).toString('hex') === '89504e470d0a1a0a') {\n  format = 'png';\n  width  = buf.readUInt32BE(16);\n  height = buf.readUInt32BE(20);\n} else if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') {\n  format = 'webp';\n} else if (buf.slice(4, 12).toString('ascii').includes('ftyp')) {\n  format = 'heic';\n}\n\n// Instagram's image publishing endpoint only accepts JPEG.\nif (format !== 'jpeg') {\n  return fail(`Instagram only accepts JPEG for image posts. This file is \"${format || 'unknown'}\". Re-export as .jpg.`);\n}\nif (!width || !height) return fail('Could not read image dimensions - file may be corrupt.');\n\nconst minW = Number(cfg.min_width) || 320;\nif (width < minW) return fail(`Width ${width}px is below the ${minW}px minimum.`);\n\nconst ratio = width / height;\nif (ratio < 0.8 || ratio > 1.91) {\n  return fail(`Aspect ratio ${ratio.toFixed(3)} is outside Instagram's 0.8 (4:5) to 1.91 (1.91:1) range. ${width}x${height}.`);\n}\n\n// ---- duplicate guard: FNV-1a hash over the bytes ----\nlet h = 0x811c9dc5;\nfor (let i = 0; i < buf.length; i += 97) {\n  h ^= buf[i];\n  h = Math.imul(h, 0x01000193) >>> 0;\n}\nconst image_hash = `${buf.length.toString(16)}-${h.toString(16)}`;\n\nif (cfg.block_duplicates === true || String(cfg.block_duplicates).toLowerCase() === 'true') {\n  const already = $('Read Queue').all()\n    .map(i => i.json)\n    .filter(r => String(r.id).trim() !== String(post.id).trim())\n    .filter(r => String(r.status ?? '').trim().toLowerCase() === 'posted')\n    .some(r => String(r.image_hash ?? '').trim() === image_hash);\n  if (already) return fail('This exact image has already been posted (duplicate hash).');\n}\n\nreturn [{ json: {\n  ...post,\n  image_ok: true,\n  error: '',\n  width, height, format,\n  ratio: Number(ratio.toFixed(3)),\n  size_mb: Number(sizeMB.toFixed(2)),\n  image_hash,\n  dry_run: cfg.dry_run === true || String(cfg.dry_run).toLowerCase() === 'true',\n} }];\n"
+      },
+      "id": "validate-image",
+      "name": "Validate Image",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-image_ok",
+              "leftValue": "={{ $json.image_ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "image-ok",
+      "name": "Image OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-dry_run",
+              "leftValue": "={{ $json.dry_run }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "dry-run",
+      "name": "Dry Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2400,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Config').first().json.telegram_chat_id }}",
+        "text": "=🧪 DRY RUN — nothing was published.\n\nPost ID: {{ $json.id }}\nSize: {{ $json.width }}x{{ $json.height }} ({{ $json.ratio }}) {{ $json.size_mb }} MB\nCaption preview:\n{{ $json.caption.slice(0,300) }}\n\nSet dry_run = false in Config to go live.",
+        "additionalFields": {}
+      },
+      "id": "notify-dry-run-pass",
+      "name": "Notify: Dry Run Pass",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2620,
+        60
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $env.IG_USER_ID }}/media",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "image_url",
+              "value": "={{ $json.image_url }}"
+            },
+            {
+              "name": "caption",
+              "value": "={{ $json.caption }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $env.IG_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "ig-create-container",
+      "name": "IG: Create Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2620,
+        300
+      ],
+      "onError": "stopWorkflow",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "amount": 8,
+        "unit": "seconds"
+      },
+      "id": "wait-for-processing",
+      "name": "Wait For Processing",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v21.0/{{ $('IG: Create Container').first().json.id }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "status_code,status"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $env.IG_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "ig-check-container",
+      "name": "IG: Check Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3060,
+        300
+      ],
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cont-ready",
+              "leftValue": "={{ $json.status_code }}",
+              "rightValue": "FINISHED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "container-ready",
+      "name": "Container Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Container is still processing on Meta's side. Poll again,\n// but never more than 10 times (~80s) so this can't spin forever.\nif ($runIndex >= 10) {\n  throw new Error('Instagram container did not finish after 10 polls. Status: ' + JSON.stringify($input.first().json));\n}\nreturn $input.all();\n"
+      },
+      "id": "poll-guard",
+      "name": "Poll Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3060,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $env.IG_USER_ID }}/media_publish",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "creation_id",
+              "value": "={{ $('IG: Create Container').first().json.id }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $env.IG_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "ig-publish",
+      "name": "IG: Publish",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3500,
+        300
+      ],
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v21.0/{{ $json.id }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "permalink,timestamp"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $env.IG_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "ig-get-permalink",
+      "name": "IG: Get Permalink",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3720,
+        300
+      ],
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Only reached when Instagram returned a real media ID.\nconst v = $('Validate Image').first().json;\nconst media = $('IG: Publish').first().json;\nconst link = $input.first().json;\n\nif (!media || !media.id) {\n  throw new Error('No media ID returned by Instagram - refusing to mark this row as posted.');\n}\n\nreturn [{ json: {\n  id: v.id,\n  status: 'posted',\n  permalink: link.permalink || '',\n  media_id: media.id,\n  posted_at: new Date().toISOString(),\n  image_hash: v.image_hash,\n  error_log: '',\n} }];\n"
+      },
+      "id": "build-posted-row",
+      "name": "Build Posted Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3940,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_id }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_tab }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "mark-posted",
+      "name": "Mark Posted",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        4160,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_id }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_tab }}",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "re-read-queue",
+      "name": "Re-Read Queue",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        4380,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst cfg = $('Config').first().json;\nconst rows = $input.all().map(i => i.json);\nconst remaining = rows.filter(r => {\n  const s = String(r.status ?? '').trim().toLowerCase();\n  return (s === 'pending' || s === '') && String(r.image_url ?? '').trim();\n}).length;\n\nconst threshold = Number(cfg.low_queue_alert) || 3;\nconst posted = $('Build Posted Row').first().json;\n\nreturn [{ json: {\n  remaining,\n  threshold,\n  low: remaining <= threshold,\n  permalink: posted.permalink,\n  id: posted.id,\n} }];\n"
+      },
+      "id": "count-remaining",
+      "name": "Count Remaining",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-low",
+              "leftValue": "={{ $json.low }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "low-queue",
+      "name": "Low Queue?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4820,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Config').first().json.telegram_chat_id }}",
+        "text": "=✅ Posted: {{ $json.id }}\n{{ $json.permalink }}\n\n⚠️ ONLY {{ $json.remaining }} POST(S) LEFT IN THE BOX.\nTop it up before the queue runs dry.",
+        "additionalFields": {}
+      },
+      "id": "notify-refill-soon",
+      "name": "Notify: Refill Soon",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        5040,
+        180
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Config').first().json.telegram_chat_id }}",
+        "text": "=✅ Posted: {{ $json.id }}\n{{ $json.permalink }}\n\n{{ $json.remaining }} post(s) still queued.",
+        "additionalFields": {}
+      },
+      "id": "notify-posted",
+      "name": "Notify: Posted",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        5040,
+        420
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Validation failed. Decide: retry next slot, or give up cleanly.\n// Either way the row NEVER gets marked \"posted\".\nconst cfg = $('Config').first().json;\nconst j = $input.first().json;\nconst maxAttempts = Number(cfg.max_attempts) || 2;\nconst attempts = Number(j.attempts) || 1;\n\nconst giveUp = attempts >= maxAttempts;\n\nreturn [{ json: {\n  id: j.id,\n  status: giveUp ? 'failed' : 'pending',   // back in the box for one more try\n  locked_at: '',\n  run_id: '',\n  error_log: `[${new Date().toISOString()}] attempt ${attempts}/${maxAttempts}: ${j.error}`,\n  _give_up: giveUp,\n  _error: j.error,\n  _attempts: attempts,\n  _max: maxAttempts,\n} }];\n"
+      },
+      "id": "build-failure-row",
+      "name": "Build Failure Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_id }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Config').first().json.sheet_tab }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "mark-failed-or-retry",
+      "name": "Mark Failed Or Retry",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2620,
+        460
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Config').first().json.telegram_chat_id }}",
+        "text": "=❌ POST NOT PUBLISHED — {{ $('Build Failure Row').first().json.id }}\n\nReason: {{ $('Build Failure Row').first().json._error }}\n\nAttempt {{ $('Build Failure Row').first().json._attempts }} of {{ $('Build Failure Row').first().json._max }}.\nStatus is now: {{ $('Build Failure Row').first().json.status }}\n\nNothing was posted. Your caption is untouched.",
+        "additionalFields": {}
+      },
+      "id": "notify-post-rejected",
+      "name": "Notify: Post Rejected",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2840,
+        460
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "on-workflow-error",
+      "name": "On Workflow Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Something blew up mid-run (Instagram down, token dead, sheet locked).\n// Release the row back to \"pending\" so tomorrow's slot picks it up,\n// and tell the human exactly which node died.\nconst e = $input.first().json;\nconst wf = e.workflow || {};\nconst err = e.execution?.error || e.error || {};\n\nlet id = '';\ntry { id = e.execution?.lastNodeExecuted ? '' : ''; } catch (x) {}\n\nreturn [{ json: {\n  node: err.node?.name || e.execution?.lastNodeExecuted || 'unknown node',\n  message: (err.message || 'no message').slice(0, 500),\n  workflow: wf.name || 'Instagram Autopilot',\n  execution_url: e.execution?.url || '',\n  when: new Date().toISOString(),\n} }];\n"
+      },
+      "id": "format-error",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        900
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "release-stuck-row",
+      "name": "Release Stuck Row",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "PUT_YOUR_TELEGRAM_CHAT_ID_HERE",
+        "text": "=🔥 AUTOPILOT ERROR\n\nNode: {{ $json.node }}\nError: {{ $json.message }}\nTime: {{ $json.when }}\n{{ $json.execution_url }}\n\nAny locked row auto-releases after 2 hours and retries at the next slot.",
+        "additionalFields": {}
+      },
+      "id": "notify-workflow-error",
+      "name": "Notify: Workflow Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        900
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## ⚙️ STEP 1 — THE ONLY NODE YOU EDIT\n\nOpen **Config** and set:\n- `post_times` — e.g. `09:00,21:00`. Add more times for more posts/day.\n- `active_days` — remove `Sat,Sun` for weekdays only.\n- `blackout_dates` — `2026-10-20,2026-12-25`\n- `paused` — flip to `true` to stop everything instantly.\n- `dry_run` — `true` = full pipeline, nothing published.\n- `jitter_minutes` — `0` = exact. `10` = random 0–10 min delay.\n- `sheet_id`, `sheet_tab`, `telegram_chat_id`\n\n⏱ Times snap to 15-min buckets (`09:00 / 09:15 / 09:30 / 09:45`).\nNothing else in this workflow needs touching, ever.",
+        "height": 400,
+        "width": 620,
+        "color": 5
+      },
+      "id": "sticky-38",
+      "name": "Note 38",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 📦 THE BOX\nReads your Google Sheet, picks the oldest `pending` row,\nand locks it as `processing` so a retry can never double-post.\n\nRows stuck in `processing` >2h auto-recover.\n\n**Your caption is copied verbatim from here to Instagram.\nNo AI touches it.**",
+        "height": 300,
+        "width": 560,
+        "color": 6
+      },
+      "id": "sticky-39",
+      "name": "Note 39",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🛡 THE DOORMAN\nPure code — free, instant, zero API cost.\nChecks real file bytes for: JPEG format, dimensions,\naspect ratio (0.8–1.91), file size, and duplicate hash.\n\nFails → row goes back to `pending` for one retry, then `failed`.\n**A bad image is never published and never silently marked posted.**",
+        "height": 300,
+        "width": 620,
+        "color": 3
+      },
+      "id": "sticky-40",
+      "name": "Note 40",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1740,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 📸 PUBLISH\n2-step Instagram Graph API:\n1. create media container\n2. poll until `FINISHED` (max 10 polls)\n3. `media_publish`\n\nOnly a real media ID marks the row `posted`.\n\nUses env vars `IG_USER_ID` + `IG_ACCESS_TOKEN`.",
+        "height": 300,
+        "width": 560,
+        "color": 4
+      },
+      "id": "sticky-41",
+      "name": "Note 41",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2620,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🔔 WATCHDOG\nRecounts the box after every post.\nAt or below `low_queue_alert` (default 3) → refill ping.\nBox empty at a slot → urgent ping.",
+        "height": 240,
+        "width": 520,
+        "color": 7
+      },
+      "id": "sticky-42",
+      "name": "Note 42",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        4380,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🔥 SAFETY NET\nSet this workflow as its own **Error Workflow**\n(Settings → Error Workflow → Instagram Autopilot).\n\nLocked rows self-release after 2h, so a crash costs you\none slot — never a lost post.",
+        "height": 240,
+        "width": 520,
+        "color": 2
+      },
+      "id": "sticky-43",
+      "name": "Note 43",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        1120
+      ]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Clock Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clock Gate": {
+      "main": [
+        [
+          {
+            "node": "Is It Post Time?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is It Post Time?": {
+      "main": [
+        [
+          {
+            "node": "Human Jitter Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Not Now - Stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Human Jitter Wait": {
+      "main": [
+        [
+          {
+            "node": "Read Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Queue": {
+      "main": [
+        [
+          {
+            "node": "Pick Next Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Next Post": {
+      "main": [
+        [
+          {
+            "node": "Queue Empty?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue Empty?": {
+      "main": [
+        [
+          {
+            "node": "Notify: Queue Empty",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Lock": {
+      "main": [
+        [
+          {
+            "node": "Lock Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lock Row": {
+      "main": [
+        [
+          {
+            "node": "Download Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Image": {
+      "main": [
+        [
+          {
+            "node": "Validate Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Image": {
+      "main": [
+        [
+          {
+            "node": "Image OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Image OK?": {
+      "main": [
+        [
+          {
+            "node": "Dry Run?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Failure Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry Run?": {
+      "main": [
+        [
+          {
+            "node": "Notify: Dry Run Pass",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IG: Create Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG: Create Container": {
+      "main": [
+        [
+          {
+            "node": "Wait For Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait For Processing": {
+      "main": [
+        [
+          {
+            "node": "IG: Check Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG: Check Container": {
+      "main": [
+        [
+          {
+            "node": "Container Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Container Ready?": {
+      "main": [
+        [
+          {
+            "node": "IG: Publish",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Poll Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Guard": {
+      "main": [
+        [
+          {
+            "node": "Wait For Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG: Publish": {
+      "main": [
+        [
+          {
+            "node": "IG: Get Permalink",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG: Get Permalink": {
+      "main": [
+        [
+          {
+            "node": "Build Posted Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Posted Row": {
+      "main": [
+        [
+          {
+            "node": "Mark Posted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Posted": {
+      "main": [
+        [
+          {
+            "node": "Re-Read Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Re-Read Queue": {
+      "main": [
+        [
+          {
+            "node": "Count Remaining",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count Remaining": {
+      "main": [
+        [
+          {
+            "node": "Low Queue?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Low Queue?": {
+      "main": [
+        [
+          {
+            "node": "Notify: Refill Soon",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify: Posted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Failure Row": {
+      "main": [
+        [
+          {
+            "node": "Mark Failed Or Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Failed Or Retry": {
+      "main": [
+        [
+          {
+            "node": "Notify: Post Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "On Workflow Error": {
+      "main": [
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Release Stuck Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Release Stuck Row": {
+      "main": [
+        [
+          {
+            "node": "Notify: Workflow Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "instagram-autopilot"
+  },
+  "tags": []
+}

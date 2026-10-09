@@ -1,0 +1,4 @@
+id,image_url,caption,status,priority,scheduled_for,attempts,locked_at,run_id,image_hash,media_id,permalink,posted_at,error_log
+p001,https://drive.google.com/uc?export=download&id=FILE_ID_1,"Your caption exactly as you want it to appear. Line breaks and emojis are preserved. #hashtags #gohere",pending,0,,0,,,,,,,
+p002,https://drive.google.com/uc?export=download&id=FILE_ID_2,"Second caption. Nothing rewrites this.",pending,0,,0,,,,,,,
+p003,https://drive.google.com/uc?export=download&id=FILE_ID_3,"Third caption.",pending,5,,0,,,,,,,
